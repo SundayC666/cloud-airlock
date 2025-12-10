@@ -1,0 +1,19 @@
+# 忽略 Python 編譯檔
+__pycache__/
+*.pyc
+
+# 忽略虛擬環境
+venv/
+env/
+
+# 忽略環境變數與敏感資料 (絕對不能上傳！)
+.env
+*.pem
+*.key
+credentials.csv
+
+# 忽略 Docker 暫存
+.docker/
+
+# 忽略 Mac 系統檔 (如果你在 Mac 操作)
+.DS_Store
