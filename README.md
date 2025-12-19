@@ -18,23 +18,22 @@ Built on a **Serverless Architecture**, it launches a disposable Headless Chrome
 The system utilizes an Event-Driven Architecture to ensure isolation and scalability.
 
 ```mermaid
-graph LR
-    User[Client / Slack Bot] -->|POST /scan| API[API Gateway]
-    API -->|Trigger| Lambda[AWS Lambda (Docker)]
+graph TD
+    User["Client / Slack Bot"] -->|POST /scan| API["API Gateway"]
+    API -->|Trigger| Lambda["AWS Lambda (Docker)"]
     
     subgraph "Secure Sandbox (Ephemeral)"
-        Lambda -->|1. Launch| Chrome[Headless Chrome v143]
-        Chrome -->|2. Scrape| Web[Suspicious Website]
+        Lambda -->|"1. Launch"| Chrome["Headless Chrome v143"]
+        Chrome -->|"2. Scrape"| Web["Suspicious Website"]
     end
     
-    Lambda -->|3. Store Evidence| S3[AWS S3]
-    Lambda -->|4. Visual Analysis| AI[AWS Rekognition]
-    Lambda -->|5. Whois Lookup| Whois[Domain Registry]
+    Lambda -->|"3. Store Evidence"| S3["AWS S3"]
+    Lambda -->|"4. Visual Analysis"| AI["AWS Rekognition"]
+    Lambda -->|"5. Whois Lookup"| Whois["Domain Registry"]
     
-    Lambda -->|6. Return JSON| User
+    Lambda -->|"6. Return JSON"| User
 ```
-
-✨ Key Features
+## ✨ Key Features
 Secure Isolation: Execution happens in a temporary Docker container that is destroyed immediately after analysis.
 
 Visual Brand Spoofing Detection: Integrates AWS Rekognition (AI) to detect if a site is visually mimicking major brands (Google, Microsoft, PayPal) on non-official domains.
@@ -49,7 +48,7 @@ Computer Vision: Logo/Brand mismatch.
 
 Evidence Preservation: Automatically uploads screenshots and logs to AWS S3 for forensic audit trails.
 
-🔧 Technical Challenges & Solutions
+## 🔧 Technical Challenges & Solutions
 1. The "Dependency Hell" of Headless Chrome
 Running the latest Chrome (v143) on AWS Lambda is non-trivial due to glibc version conflicts.
 
@@ -62,30 +61,35 @@ Problem: Integrating Whois data caused crashes due to Python's datetime offset-n
 
 Solution: Implemented a robust timezone normalization layer to standardizing all timestamps to UTC before performing date arithmetic calculations.
 
-🚀 Usage (API)
+## 🚀 Usage (API)
 You can trigger a scan using curl or any HTTP client.
 
 Endpoint: POST https://3e3ax9d659.execute-api.us-east-1.amazonaws.com/scan
 
-Request:
-curl -X POST "https://3e3ax9d659.execute-api.us-east-1.amazonaws.com/scan" \
-     -H "Content-Type: application/json" \
-     -d '{"url": "https://www.google.com"}'
+**Request:**
 
-Response (Example):
+```bash
+curl -X POST "[https://3e3ax9d659.execute-api.us-east-1.amazonaws.com/scan](https://3e3ax9d659.execute-api.us-east-1.amazonaws.com/scan)" \
+     -H "Content-Type: application/json" \
+     -d '{"url": "[https://www.google.com](https://www.google.com)"}'
+```
+**Response (Example):**
+
+```JSON
 {
     "status": "success",
-    "url": "https://www.google.com",
+    "url": "[https://www.google.com](https://www.google.com)",
     "risk_analysis": {
         "score": 0,
         "risk_level": "LOW",
         "domain_age_days": 10322,
         "reasons": []
     },
-    "s3_key": "evidence/20251219-222148_www.google.com.png"
+    "s3_key": "evidence/20251219-222148_[www.google.com](https://www.google.com).png"
 }
+```
 
-🛠️ Tech Stack
+** 🛠️ Tech Stack
 Runtime: Python 3.12, Amazon Linux 2023
 
 Browser Automation: Selenium WebDriver, Google Chrome (Headless)
@@ -96,5 +100,5 @@ AI/ML: AWS Rekognition (OCR & Object Detection)
 
 DevOps: Docker, Git
 
-📜 License
+## 📜 License
 MIT License
