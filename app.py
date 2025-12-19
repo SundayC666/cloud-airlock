@@ -197,9 +197,32 @@ def take_screenshot(target_url):
 
 def handler(event, context):
     print("Received event:", json.dumps(event))
-    target_url = event.get("url", "https://www.google.com")
+    
+    # --- API Gateway Adapter Start ---
+    # 如果是由 API Gateway 觸發，資料會在 'body' 裡，且是字串格式
+    if 'body' in event:
+        try:
+            body_data = json.loads(event['body'])
+            target_url = body_data.get("url")
+        except Exception as e:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"status": "error", "message": "Invalid JSON body"})
+            }
+    else:
+        # 如果是由 AWS Console Test 觸發，直接讀取 event
+        target_url = event.get("url")
+    # --- API Gateway Adapter End ---
+
+    if not target_url:
+        target_url = "https://www.google.com" # Default fallback
+
     result = take_screenshot(target_url)
+    
     return {
         "statusCode": 200,
+        "headers": {
+            "Content-Type": "application/json"
+        },
         "body": json.dumps(result)
     }
