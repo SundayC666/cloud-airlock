@@ -2,3 +2,4 @@ selenium
 webdriver-manager
 boto3
 python-whois
+slack_bolt

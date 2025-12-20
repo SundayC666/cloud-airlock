@@ -1,228 +1,40 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
-from urllib.parse import urlparse
-import time
 import json
 import os
-import boto3
-import whois
-from datetime import datetime, timezone 
+import logging
+from slack_bolt import App
+from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
-# ⚠️ CONFIGURATION: Verify this matches your actual S3 Bucket name
-BUCKET_NAME = "cloud-airlock-evidence-2025-v1" 
+# Initialize Logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-def upload_to_s3(local_path, url):
-    """ Uploads screenshot to AWS S3 and generates a unique key """
-    s3 = boto3.client('s3')
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    safe_url = url.replace("https://", "").replace("http://", "").replace("/", "_")
-    s3_filename = f"evidence/{timestamp}_{safe_url}.png"
+# 1. Initialize Slack App
+# It automatically reads environment variables: SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET
+app = App(process_before_response=True)
+
+# 2. Handle Slack's "Challenge" (URL Verification)
+# When you configure the URL in Slack API settings, Slack sends this request to verify ownership.
+@app.event("url_verification")
+def handle_challenge(body, logger):
+    return body["challenge"]
+
+# 3. Handle the "/scan" command
+@app.command("/scan")
+def handle_scan_command(ack, body, respond):
+    # A. Acknowledge the command within 3 seconds to prevent Slack timeout errors
+    ack()
     
-    try:
-        s3.upload_file(local_path, BUCKET_NAME, s3_filename)
-        return s3_filename
-    except Exception as e:
-        print(f"⚠️ S3 Upload Warning: {e}")
-        return None
-
-def get_domain_age(url):
-    """
-    Telemetry Signal: Checks domain registration age via Whois.
-    Fix: Handles timezone-aware vs naive datetimes.
-    """
-    domain = urlparse(url).netloc
-    print(f"🔍 Checking Whois for domain: {domain}")
-    try:
-        w = whois.whois(domain)
-        creation_date = w.creation_date
-        
-        # Whois sometimes returns a list of dates; take the first one
-        if isinstance(creation_date, list):
-            creation_date = creation_date[0]
-            
-        if creation_date:
-            # --- Timezone Fix Start ---
-            # 1. Get current time in UTC (aware)
-            now = datetime.now(timezone.utc)
-            
-            # 2. Check if creation_date is naive (no timezone), if so, assume UTC
-            if creation_date.tzinfo is None:
-                creation_date = creation_date.replace(tzinfo=timezone.utc)
-            
-            # 3. Calculate days difference
-            age_days = (now - creation_date).days
-            # --- Timezone Fix End ---
-            
-            return age_days, str(creation_date)
-            
-    except Exception as e:
-        print(f"⚠️ Whois lookup failed: {e}")
+    user_id = body["user_id"]
+    text = body["text"]  # The URL input by the user
     
-    return None, "Unknown"
+    # B. Send an immediate response indicating the scan has started
+    respond(f"🚨 Mission received! Scanning target: {text} \nPlease wait, AI analyst is investigating... 🕵️‍♂️")
 
-def ai_logo_detection(s3_bucket, s3_key):
-    """ 
-    AWS Rekognition: Performs visual analysis to detect brand logos.
-    """
-    rekognition = boto3.client('rekognition')
-    detected_brands = []
-    
-    if not s3_key:
-        return []
+    # TODO: We will add the actual scanning logic here in the next step
+    # Currently just testing connectivity
 
-    try:
-        print(f"🧠 AI Analyzing visual evidence...")
-        response = rekognition.detect_text(
-            Image={'S3Object': {'Bucket': s3_bucket, 'Name': s3_key}}
-        )
-        
-        for text in response['TextDetections']:
-            if text['Type'] == 'LINE' and text['Confidence'] > 85:
-                content = text['DetectedText'].lower()
-                if "google" in content: detected_brands.append("Google")
-                elif "microsoft" in content: detected_brands.append("Microsoft")
-                elif "paypal" in content: detected_brands.append("PayPal")
-                elif "apple" in content: detected_brands.append("Apple")
-                    
-        return list(set(detected_brands))
-    except Exception as e:
-        print(f"⚠️ AI Analysis Failed: {e}")
-        return []
-
-def analyze_risk(driver, url, page_title, ai_brands):
-    """
-    Comprehensive Risk Scoring Engine (0-100 Score).
-    """
-    score = 0
-    reasons = []
-    domain = urlparse(url).netloc.lower()
-    
-    # 1. [Telemetry] Domain Age Check
-    age_days, creation_date = get_domain_age(url)
-    if age_days is not None and age_days < 30:
-        score += 40
-        reasons.append(f"🚨 NEW DOMAIN: Registered only {age_days} days ago (+40)")
-    
-    # 2. [Visual] AI Brand Spoofing Detection
-    for brand in ai_brands:
-        official_domains = {
-            "Google": "google.com", 
-            "Microsoft": "microsoft.com", 
-            "PayPal": "paypal.com", 
-            "Apple": "apple.com"
-        }
-        official = official_domains.get(brand)
-        if official and official not in domain:
-            score += 50
-            reasons.append(f"🚨 VISUAL SPOOFING: Found '{brand}' logo but domain is not '{official}' (+50)")
-
-    # 3. [Heuristic] Password Input Detection
-    password_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
-    if len(password_inputs) > 0:
-        score += 20
-        reasons.append("Input: Password field detected (+20)")
-
-    # 4. [Heuristic] Suspicious Keyword Detection
-    page_source = driver.page_source.lower()
-    suspicious_keywords = ["verify your account", "urgent action", "suspended", "account locked"]
-    if any(k in page_source for k in suspicious_keywords):
-        score += 10
-        reasons.append("Content: Suspicious urgency keywords detected (+10)")
-
-    final_score = min(score, 100)
-    
-    risk_level = "LOW"
-    if final_score >= 80: risk_level = "CRITICAL"
-    elif final_score >= 50: risk_level = "HIGH"
-    
-    return {
-        "score": final_score,
-        "risk_level": risk_level,
-        "domain_age_days": age_days,
-        "reasons": reasons
-    }
-
-def take_screenshot(target_url):
-    print(f"🚀 Starting Cloud-Airlock scan for: {target_url}")
-    
-    chrome_options = Options()
-    chrome_options.binary_location = "/usr/bin/google-chrome"
-    chrome_options.add_argument("--headless=new") 
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1280x1696")
-    chrome_options.add_argument("--disable-dev-tools")
-    chrome_options.add_argument("--no-zygote")
-    chrome_options.add_argument(f"--user-data-dir=/tmp/chrome-user-data")
-    chrome_options.add_argument(f"--data-path=/tmp/chrome-data-path")
-    chrome_options.add_argument(f"--disk-cache-dir=/tmp/chrome-cache")
-    chrome_options.add_argument("--remote-debugging-pipe")
-    
-    os.environ['WDM_CACHE_DIR'] = '/tmp/wdm_cache'
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-
-    try:
-        print(f"🔗 Navigating to {target_url}...")
-        driver.get(target_url)
-        time.sleep(3)
-
-        page_title = driver.title
-        screenshot_path = "/tmp/evidence.png"
-        driver.save_screenshot(screenshot_path)
-        
-        s3_key = upload_to_s3(screenshot_path, target_url)
-        ai_brands = ai_logo_detection(BUCKET_NAME, s3_key)
-        risk_analysis = analyze_risk(driver, target_url, page_title, ai_brands)
-        print(f"⚠️ Risk Score: {risk_analysis['score']} - {risk_analysis['reasons']}")
-        
-        return {
-            "status": "success",
-            "url": target_url,
-            "title": page_title,
-            "s3_key": s3_key,
-            "risk_analysis": risk_analysis
-        }
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return {"status": "error", "message": str(e)}
-    finally:
-        try: driver.quit()
-        except: pass
-
-def handler(event, context):
-    print("Received event:", json.dumps(event))
-    
-    # --- API Gateway Adapter Start ---
-    # 如果是由 API Gateway 觸發，資料會在 'body' 裡，且是字串格式
-    if 'body' in event:
-        try:
-            body_data = json.loads(event['body'])
-            target_url = body_data.get("url")
-        except Exception as e:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"status": "error", "message": "Invalid JSON body"})
-            }
-    else:
-        # 如果是由 AWS Console Test 觸發，直接讀取 event
-        target_url = event.get("url")
-    # --- API Gateway Adapter End ---
-
-    if not target_url:
-        target_url = "https://www.google.com" # Default fallback
-
-    result = take_screenshot(target_url)
-    
-    return {
-        "statusCode": 200,
-        "headers": {
-            "Content-Type": "application/json"
-        },
-        "body": json.dumps(result)
-    }
+# 4. AWS Lambda Entry Point (Handler)
+def lambda_handler(event, context):
+    # Adapt Slack Bolt to handle AWS Lambda events
+    slack_handler = SlackRequestHandler(app=app)
+    return slack_handler.handle(event, context)
