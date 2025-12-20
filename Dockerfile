@@ -2,9 +2,8 @@
 FROM public.ecr.aws/lambda/python:3.12
 
 # 2. Install System Dependencies
-# Note: We explicitly install 'rpm' to use it for the Chrome installation, 
-# bypassing dnf's local file resolution issues.
-# We also added 'whois' for domain age telemetry.
+# We explicitly install 'rpm' and libraries required for Headless Chrome.
+# 'whois' is added for domain age telemetry.
 RUN dnf install -y \
     rpm \
     atk cups-libs gtk3 libXcomposite libXcursor libXdamage libXext libXi libXtst \
@@ -15,9 +14,8 @@ RUN dnf install -y \
     wget \
     whois
 
-# 3. Download and Install Google Chrome (Force Install)
-# Strategy: We use 'rpm -ivh' (Install Verbose Hash) instead of 'dnf'.
-# This bypasses the "Package not found" bug when installing local RPMs on AL2023.
+# 3. Download and Install Google Chrome
+# Strategy: Use 'rpm -ivh' to bypass dnf local file resolution issues on AL2023.
 RUN cd /tmp && \
     wget https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm && \
     rpm -ivh google-chrome-stable_current_x86_64.rpm && \
@@ -33,4 +31,5 @@ RUN pip install -r requirements.txt
 COPY app.py ${LAMBDA_TASK_ROOT}
 
 # 7. Set the Container Entrypoint
-CMD [ "app.handler" ]
+# CRITICAL FIX: This must match the function name defined in app.py (lambda_handler)
+CMD [ "app.lambda_handler" ]
