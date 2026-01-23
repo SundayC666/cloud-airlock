@@ -58,10 +58,20 @@ def scan_url(url):
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument('--window-size=1280,720')
     chrome_options.add_argument('--single-process')
     chrome_options.add_argument('--disable-extensions')
     chrome_options.add_argument('--disable-software-rasterizer')
+    chrome_options.add_argument('--disable-background-networking')
+    chrome_options.add_argument('--disable-default-apps')
+    chrome_options.add_argument('--disable-sync')
+    chrome_options.add_argument('--disable-translate')
+    chrome_options.add_argument('--disable-logging')
+    chrome_options.add_argument('--no-first-run')
+    chrome_options.add_argument('--no-zygote')
+    chrome_options.add_argument('--disable-setuid-sandbox')
+    chrome_options.add_argument('--remote-debugging-port=9222')
+    chrome_options.add_argument('--user-data-dir=/tmp/chrome-data')
     chrome_options.binary_location = '/usr/bin/google-chrome-stable'
 
     driver = None
