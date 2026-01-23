@@ -61,22 +61,40 @@ def scan_url(url):
         shutil.rmtree(chrome_data_dir, ignore_errors=True)
 
     chrome_options = Options()
-    chrome_options.add_argument('--headless')
+    # Essential headless flags for Lambda
+    chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1280,720')
+    # Process isolation flags (critical for Lambda)
     chrome_options.add_argument('--single-process')
     chrome_options.add_argument('--no-zygote')
     chrome_options.add_argument('--disable-setuid-sandbox')
-    chrome_options.add_argument('--disable-features=VizDisplayCompositor')
+    # Memory and stability flags
+    chrome_options.add_argument('--disable-software-rasterizer')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-background-networking')
+    chrome_options.add_argument('--disable-sync')
+    chrome_options.add_argument('--disable-translate')
+    chrome_options.add_argument('--disable-default-apps')
+    chrome_options.add_argument('--no-first-run')
+    chrome_options.add_argument('--safebrowsing-disable-auto-update')
+    # Rendering flags
+    chrome_options.add_argument('--window-size=1280,720')
+    chrome_options.add_argument('--hide-scrollbars')
+    chrome_options.add_argument('--mute-audio')
+    # Data directories (Lambda only allows /tmp)
     chrome_options.add_argument(f'--user-data-dir={chrome_data_dir}')
     chrome_options.add_argument('--crash-dumps-dir=/tmp')
+    chrome_options.add_argument('--disk-cache-dir=/tmp/chrome-cache')
+    # Chrome binary location
     chrome_options.binary_location = '/usr/bin/google-chrome-stable'
 
     driver = None
     try:
-        driver = webdriver.Chrome(options=chrome_options)
+        # Use explicitly installed chromedriver
+        service = Service(executable_path='/usr/local/bin/chromedriver')
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(60)
 
         driver.get(url)

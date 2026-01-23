@@ -21,15 +21,28 @@ RUN cd /tmp && \
     rpm -ivh google-chrome-stable_current_x86_64.rpm && \
     rm google-chrome-stable_current_x86_64.rpm
 
-# 4. Copy Project Files
+# 4. Install ChromeDriver matching Chrome version
+# Get the installed Chrome version and download matching chromedriver
+RUN CHROME_VERSION=$(google-chrome-stable --version | awk '{print $3}' | cut -d'.' -f1-3) && \
+    echo "Chrome version: $CHROME_VERSION" && \
+    CHROMEDRIVER_URL="https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}.0/linux64/chromedriver-linux64.zip" && \
+    cd /tmp && \
+    wget -q "$CHROMEDRIVER_URL" -O chromedriver.zip && \
+    unzip chromedriver.zip && \
+    mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver && \
+    chmod +x /usr/local/bin/chromedriver && \
+    rm -rf chromedriver.zip chromedriver-linux64 && \
+    echo "ChromeDriver installed: $(chromedriver --version)"
+
+# 5. Copy Project Files
 COPY requirements.txt ${LAMBDA_TASK_ROOT}
 
-# 5. Install Python Dependencies
+# 6. Install Python Dependencies
 RUN pip install -r requirements.txt
 
-# 6. Copy Application Code
+# 7. Copy Application Code
 COPY app.py ${LAMBDA_TASK_ROOT}
 
-# 7. Set the Container Entrypoint
+# 8. Set the Container Entrypoint
 # CRITICAL FIX: This must match the function name defined in app.py (lambda_handler)
 CMD [ "app.lambda_handler" ]
