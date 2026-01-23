@@ -17,3 +17,10 @@ credentials.csv
 
 # 忽略 Mac 系統檔 (如果你在 Mac 操作)
 .DS_Store
+
+# 忽略 AI 輔助工具設定檔
+CLAUDE.md
+.claude/
+.cursor/
+.cursorrules
+.github/copilot-instructions.md
