@@ -441,15 +441,16 @@ def handle_challenge(body, logger):
 # Handle the "/scan" command - using lazy listener pattern for Lambda
 # The ack function runs immediately, while the lazy function runs async
 
-def respond_to_scan_command(body, respond):
+def respond_to_scan_command(body, ack):
     """
     Immediate acknowledgment handler - must complete in < 3 seconds.
+    Uses ack() to send immediate response to Slack.
     """
     url = body["text"].strip()
 
     # Validate URL
     if not url:
-        respond("❌ Please provide a URL to scan. Usage: `/scan https://example.com`")
+        ack("❌ Please provide a URL to scan. Usage: `/scan https://example.com`")
         return
 
     # Add https:// if no protocol specified
@@ -458,20 +459,22 @@ def respond_to_scan_command(body, respond):
 
     scan_id = generate_scan_id()
 
-    # Store scan_id in body for lazy handler
-    body["scan_id"] = scan_id
-    body["normalized_url"] = url
-
-    # Send initial response immediately
-    respond(f"🔍 *Scan initiated*\n• Target: `{url}`\n• Scan ID: `{scan_id}`\n\n⏳ Analyzing... This may take 15-30 seconds.")
+    # Acknowledge with initial message (this sends HTTP 200 to Slack immediately)
+    ack(f"🔍 *Scan initiated*\n• Target: `{url}`\n• Scan ID: `{scan_id}`\n\n⏳ Analyzing... This may take 15-30 seconds.")
 
 
-def process_scan_in_background(body, respond):
+def process_scan_in_background(respond, body):
     """
     Lazy handler - runs after acknowledgment, can take longer.
+    Note: parameter order is (respond, body) for lazy listeners.
     """
-    url = body.get("normalized_url", body["text"].strip())
-    scan_id = body.get("scan_id", generate_scan_id())
+    url = body["text"].strip()
+
+    # Add https:// if no protocol specified
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = 'https://' + url
+
+    scan_id = generate_scan_id()
 
     # Re-normalize URL if needed
     if not url.startswith('http://') and not url.startswith('https://'):
