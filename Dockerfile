@@ -22,10 +22,11 @@ RUN cd /tmp && \
     rm google-chrome-stable_current_x86_64.rpm
 
 # 4. Install ChromeDriver matching Chrome version
-# Get the installed Chrome version and download matching chromedriver
-RUN CHROME_VERSION=$(google-chrome-stable --version | awk '{print $3}' | cut -d'.' -f1-3) && \
+# Get the full Chrome version (all 4 parts: major.minor.build.patch)
+RUN CHROME_VERSION=$(google-chrome-stable --version | awk '{print $3}') && \
     echo "Chrome version: $CHROME_VERSION" && \
-    CHROMEDRIVER_URL="https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}.0/linux64/chromedriver-linux64.zip" && \
+    CHROMEDRIVER_URL="https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" && \
+    echo "Downloading chromedriver from: $CHROMEDRIVER_URL" && \
     cd /tmp && \
     wget -q "$CHROMEDRIVER_URL" -O chromedriver.zip && \
     unzip chromedriver.zip && \
