@@ -193,6 +193,54 @@ def has_password_field(html):
     return False
 
 
+# Urgency keywords commonly used in phishing attacks
+URGENCY_KEYWORDS = [
+    # Account threats
+    r'account.{0,20}(suspend|terminat|disabl|lock|restrict|compromis)',
+    r'(suspend|terminat|disabl|lock|restrict).{0,20}account',
+    r'unauthorized.{0,20}(access|activity|login)',
+    # Time pressure
+    r'(immediate|urgent|within|action required)',
+    r'(24|48|72).{0,5}hours?',
+    r'expires?.{0,10}(today|soon|immediately)',
+    # Verification demands
+    r'verify.{0,20}(your|account|identity|information)',
+    r'confirm.{0,20}(your|account|identity|information)',
+    r'update.{0,20}(your|account|payment|billing)',
+    # Threat language
+    r'failure to.{0,20}(comply|respond|verify)',
+    r'will (be|result in).{0,20}(suspend|terminat|lock|los)',
+    # Common phishing phrases
+    r'click.{0,10}(here|below|link).{0,10}(to verify|to confirm|to update)',
+    r'unusual.{0,20}(activity|sign-in|login)',
+]
+
+
+def detect_urgency_keywords(html):
+    """
+    Detect urgency/threat keywords commonly used in phishing.
+    Returns: list of matched keyword patterns
+    """
+    # Remove HTML tags for text analysis
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = text.lower()
+
+    matched_keywords = []
+
+    for pattern in URGENCY_KEYWORDS:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            matched_keywords.extend(matches if isinstance(matches[0], str) else [m[0] for m in matches])
+
+    # Deduplicate and limit
+    unique_keywords = list(set(matched_keywords))[:5]
+
+    if unique_keywords:
+        logger.info(f"Urgency keywords detected: {unique_keywords}")
+
+    return unique_keywords
+
+
 def detect_brands(screenshot_bytes):
     """
     Use AWS Rekognition to detect brand logos in screenshot.
@@ -281,7 +329,13 @@ def analyze_risk(url, html, screenshot_bytes):
         score += 25
         factors.append("🔐 Password input field detected")
 
-    # C. Brand Spoofing Detection
+    # C. Urgency Keywords Detection
+    urgency_matches = detect_urgency_keywords(html)
+    if urgency_matches:
+        score += 20
+        factors.append(f"⏰ Urgency keywords detected: {', '.join(urgency_matches[:3])}")
+
+    # D. Brand Spoofing Detection
     detected_brands = detect_brands(screenshot_bytes)
     if detected_brands:
         if not domain_matches_brand(url, detected_brands):
@@ -396,10 +450,123 @@ def handle_scan_command(ack, body, respond):
 
 
 # ============================================
+# REST API Handler
+# ============================================
+
+def handle_rest_api_scan(event):
+    """
+    Handle REST API scan requests.
+    Returns: JSON response with scan results
+    """
+    try:
+        # Parse request body
+        body = event.get('body', '{}')
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        url = body.get('url', '').strip()
+
+        if not url:
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'status': 'error',
+                    'message': 'Missing required parameter: url'
+                })
+            }
+
+        # Add https:// if no protocol specified
+        if not url.startswith('http://') and not url.startswith('https://'):
+            url = 'https://' + url
+
+        scan_id = generate_scan_id()
+
+        # 1. Scan URL
+        screenshot_bytes, html, final_url = scan_url(url)
+
+        # 2. Upload evidence
+        s3_key = f"scans/{scan_id}/screenshot.png"
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=screenshot_bytes,
+            ContentType='image/png'
+        )
+
+        # 3. Analyze risk
+        score, factors = analyze_risk(url, html, screenshot_bytes)
+
+        # 4. Get domain age for response
+        domain_age = get_domain_age(url)
+
+        # Determine risk level
+        if score >= 70:
+            risk_level = "HIGH"
+        elif score >= 40:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+
+        # Build response
+        response_body = {
+            'status': 'success',
+            'url': url,
+            'final_url': final_url,
+            'scan_id': scan_id,
+            'risk_analysis': {
+                'score': score,
+                'risk_level': risk_level,
+                'domain_age_days': domain_age,
+                'reasons': [f.replace('⚠️ ', '').replace('🔐 ', '').replace('⏰ ', '').replace('🎭 ', '').replace('✅ ', '').replace('❓ ', '').replace('📅 ', '') for f in factors]
+            },
+            's3_key': s3_key
+        }
+
+        logger.info(f"REST API scan completed: {scan_id} - Score: {score}")
+
+        return {
+            'statusCode': 200,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps(response_body)
+        }
+
+    except Exception as e:
+        logger.error(f"REST API scan failed: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'status': 'error',
+                'message': str(e)
+            })
+        }
+
+
+# ============================================
 # AWS Lambda Entry Point
 # ============================================
 
 def lambda_handler(event, context):
-    """AWS Lambda handler - adapts Slack Bolt to Lambda events."""
-    slack_handler = SlackRequestHandler(app=app)
-    return slack_handler.handle(event, context)
+    """
+    AWS Lambda handler - routes to Slack or REST API based on request type.
+    """
+    logger.info(f"Received event: {json.dumps(event)[:500]}")
+
+    # Check if this is a Slack request (has slack-specific headers or body format)
+    headers = event.get('headers', {}) or {}
+    headers_lower = {k.lower(): v for k, v in headers.items()}
+
+    # Slack requests have x-slack-signature header
+    if 'x-slack-signature' in headers_lower:
+        slack_handler = SlackRequestHandler(app=app)
+        return slack_handler.handle(event, context)
+
+    # Check body for Slack-specific content
+    body = event.get('body', '')
+    if isinstance(body, str) and ('command=' in body or 'payload=' in body or '"type":"url_verification"' in body):
+        slack_handler = SlackRequestHandler(app=app)
+        return slack_handler.handle(event, context)
+
+    # Otherwise, treat as REST API request
+    return handle_rest_api_scan(event)
