@@ -41,7 +41,12 @@ BRAND_DOMAINS = {
 
 # 1. Initialize Slack App
 # It automatically reads environment variables: SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET
+# process_before_response=True is required for Lambda to use lazy listeners
 app = App(process_before_response=True)
+
+# Slack client for posting messages (used in async handlers)
+from slack_sdk import WebClient
+slack_client = WebClient(token=os.environ.get('SLACK_BOT_TOKEN'))
 
 
 # ============================================
@@ -433,13 +438,13 @@ def handle_challenge(body, logger):
     return body["challenge"]
 
 
-# Handle the "/scan" command
-@app.command("/scan")
-def handle_scan_command(ack, body, respond):
-    # Acknowledge within 3 seconds to prevent Slack timeout
-    ack()
+# Handle the "/scan" command - using lazy listener pattern for Lambda
+# The ack function runs immediately, while the lazy function runs async
 
-    user_id = body["user_id"]
+def respond_to_scan_command(body, respond):
+    """
+    Immediate acknowledgment handler - must complete in < 3 seconds.
+    """
     url = body["text"].strip()
 
     # Validate URL
@@ -453,8 +458,24 @@ def handle_scan_command(ack, body, respond):
 
     scan_id = generate_scan_id()
 
-    # Send initial response
+    # Store scan_id in body for lazy handler
+    body["scan_id"] = scan_id
+    body["normalized_url"] = url
+
+    # Send initial response immediately
     respond(f"🔍 *Scan initiated*\n• Target: `{url}`\n• Scan ID: `{scan_id}`\n\n⏳ Analyzing... This may take 15-30 seconds.")
+
+
+def process_scan_in_background(body, respond):
+    """
+    Lazy handler - runs after acknowledgment, can take longer.
+    """
+    url = body.get("normalized_url", body["text"].strip())
+    scan_id = body.get("scan_id", generate_scan_id())
+
+    # Re-normalize URL if needed
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = 'https://' + url
 
     try:
         # 1. Scan URL with headless Chrome
@@ -475,6 +496,13 @@ def handle_scan_command(ack, body, respond):
     except Exception as e:
         logger.error(f"Scan failed for {url}: {str(e)}")
         respond(f"❌ *Scan failed*\n• Target: `{url}`\n• Error: `{str(e)}`\n\nPlease check if the URL is accessible and try again.")
+
+
+# Register command with lazy listener pattern
+app.command("/scan")(
+    ack=respond_to_scan_command,
+    lazy=[process_scan_in_background]
+)
 
 
 # ============================================
