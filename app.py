@@ -3,7 +3,6 @@ import os
 import logging
 import re
 import uuid
-import threading
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -23,6 +22,7 @@ logger.setLevel(logging.INFO)
 # AWS Clients
 s3_client = boto3.client('s3')
 rekognition_client = boto3.client('rekognition')
+lambda_client = boto3.client('lambda')
 
 # Environment Variables
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'cloud-airlock-evidence')
@@ -42,8 +42,8 @@ BRAND_DOMAINS = {
 }
 
 # 1. Initialize Slack App
-# process_before_response=False allows ack() to return immediately
-app = App(process_before_response=False)
+# process_before_response=True ensures handler completes before response is sent
+app = App(process_before_response=True)
 
 
 # ============================================
@@ -435,57 +435,18 @@ def handle_challenge(body, logger):
     return body["challenge"]
 
 
-# Background scan worker function
-def run_scan_worker(url, scan_id, response_url):
-    """
-    Worker function that runs the actual scan in background.
-    Uses response_url to send results back to Slack.
-    """
-    try:
-        # 1. Scan URL with headless Chrome
-        screenshot_bytes, html, final_url = scan_url(url)
-
-        # 2. Upload evidence to S3
-        evidence_url = upload_evidence(screenshot_bytes, scan_id)
-
-        # 3. Analyze risk factors
-        score, factors = analyze_risk(url, html, screenshot_bytes)
-
-        # 4. Format and send report
-        report = format_report(url, final_url, score, factors, evidence_url, scan_id)
-
-        # Send result via response_url
-        requests.post(response_url, json={"text": report, "response_type": "in_channel"})
-
-        logger.info(f"Scan completed: {scan_id} - Score: {score}")
-
-    except Exception as e:
-        logger.error(f"Scan failed for {url}: {str(e)}")
-        error_msg = f"❌ *Scan failed*\n• Target: `{url}`\n• Error: `{str(e)}`\n\nPlease check if the URL is accessible and try again."
-        requests.post(response_url, json={"text": error_msg, "response_type": "in_channel"})
-
-
 # Handle the "/scan" command
 @app.command("/scan")
-def handle_scan_command(ack, body, client):
+def handle_scan_command(ack, body, context):
     """
-    Handle /scan command. Acknowledges immediately, then processes scan.
-    Uses response_url to send results asynchronously.
+    Handle /scan command. Acknowledges immediately, then invokes Lambda async for scan.
     """
-    # Acknowledge IMMEDIATELY with empty response (fastest way to satisfy 3s timeout)
-    ack()
-
     url = body.get("text", "").strip()
     response_url = body.get("response_url")
-    channel_id = body.get("channel_id")
-    user_id = body.get("user_id")
 
-    # Validate URL
+    # Validate URL first
     if not url:
-        requests.post(response_url, json={
-            "text": "❌ Please provide a URL to scan. Usage: `/scan https://example.com`",
-            "response_type": "ephemeral"
-        })
+        ack("❌ Please provide a URL to scan. Usage: `/scan https://example.com`")
         return
 
     # Add https:// if no protocol specified
@@ -494,14 +455,27 @@ def handle_scan_command(ack, body, client):
 
     scan_id = generate_scan_id()
 
-    # Send initial message via response_url
-    requests.post(response_url, json={
-        "text": f"🔍 *Scan initiated*\n• Target: `{url}`\n• Scan ID: `{scan_id}`\n\n⏳ Analyzing... This may take 15-30 seconds.",
-        "response_type": "in_channel"
-    })
+    # Acknowledge with initial message (this responds to Slack within 3 seconds)
+    ack(f"🔍 *Scan initiated*\n• Target: `{url}`\n• Scan ID: `{scan_id}`\n\n⏳ Analyzing... This may take 15-30 seconds.")
 
-    # Run scan and send results via response_url
-    run_scan_worker(url, scan_id, response_url)
+    # Get Lambda function name from context or environment
+    function_name = os.environ.get('AWS_LAMBDA_FUNCTION_NAME', 'Cloud-Airlock-Bot')
+
+    # Invoke Lambda asynchronously to process the scan
+    try:
+        lambda_client.invoke(
+            FunctionName=function_name,
+            InvocationType='Event',  # Async invocation
+            Payload=json.dumps({
+                'type': 'async_scan',
+                'url': url,
+                'scan_id': scan_id,
+                'response_url': response_url
+            })
+        )
+        logger.info(f"Async scan invoked: {scan_id}")
+    except Exception as e:
+        logger.error(f"Failed to invoke async scan: {e}")
 
 
 # ============================================
@@ -599,14 +573,64 @@ def handle_rest_api_scan(event):
 
 
 # ============================================
+# Async Scan Handler (invoked by Lambda self-invocation)
+# ============================================
+
+def handle_async_scan(event):
+    """
+    Handle async scan request (invoked via Lambda async invocation).
+    """
+    url = event.get('url')
+    scan_id = event.get('scan_id')
+    response_url = event.get('response_url')
+
+    logger.info(f"Starting async scan: {scan_id} for {url}")
+
+    try:
+        # 1. Scan URL with headless Chrome
+        screenshot_bytes, html, final_url = scan_url(url)
+
+        # 2. Upload evidence to S3
+        evidence_url = upload_evidence(screenshot_bytes, scan_id)
+
+        # 3. Analyze risk factors
+        score, factors = analyze_risk(url, html, screenshot_bytes)
+
+        # 4. Format and send report
+        report = format_report(url, final_url, score, factors, evidence_url, scan_id)
+
+        # Send result via response_url
+        requests.post(response_url, json={"text": report, "response_type": "in_channel"}, timeout=10)
+
+        logger.info(f"Async scan completed: {scan_id} - Score: {score}")
+        return {'status': 'success', 'scan_id': scan_id, 'score': score}
+
+    except Exception as e:
+        logger.error(f"Async scan failed for {url}: {str(e)}")
+        error_msg = f"❌ *Scan failed*\n• Target: `{url}`\n• Error: `{str(e)}`\n\nPlease check if the URL is accessible and try again."
+        try:
+            requests.post(response_url, json={"text": error_msg, "response_type": "in_channel"}, timeout=10)
+        except Exception as post_error:
+            logger.error(f"Failed to post error to Slack: {post_error}")
+        return {'status': 'error', 'scan_id': scan_id, 'error': str(e)}
+
+
+# ============================================
 # AWS Lambda Entry Point
 # ============================================
 
 def lambda_handler(event, context):
     """
-    AWS Lambda handler - routes to Slack or REST API based on request type.
+    AWS Lambda handler - routes based on event type:
+    1. Async scan events (self-invocation)
+    2. Slack commands
+    3. REST API requests
     """
     logger.info(f"Received event: {json.dumps(event)[:500]}")
+
+    # Check if this is an async scan request (Lambda self-invocation)
+    if event.get('type') == 'async_scan':
+        return handle_async_scan(event)
 
     # Check if this is a Slack request (has slack-specific headers or body format)
     headers = event.get('headers', {}) or {}
