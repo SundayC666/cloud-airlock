@@ -3,11 +3,13 @@ import os
 import logging
 import re
 import uuid
+import threading
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import boto3
 import whois
+import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -40,13 +42,8 @@ BRAND_DOMAINS = {
 }
 
 # 1. Initialize Slack App
-# It automatically reads environment variables: SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET
-# process_before_response=True is required for Lambda to use lazy listeners
-app = App(process_before_response=True)
-
-# Slack client for posting messages (used in async handlers)
-from slack_sdk import WebClient
-slack_client = WebClient(token=os.environ.get('SLACK_BOT_TOKEN'))
+# process_before_response=False allows ack() to return immediately
+app = App(process_before_response=False)
 
 
 # ============================================
@@ -438,48 +435,12 @@ def handle_challenge(body, logger):
     return body["challenge"]
 
 
-# Handle the "/scan" command - using lazy listener pattern for Lambda
-# The ack function runs immediately, while the lazy function runs async
-
-def respond_to_scan_command(body, ack):
+# Background scan worker function
+def run_scan_worker(url, scan_id, response_url):
     """
-    Immediate acknowledgment handler - must complete in < 3 seconds.
-    Uses ack() to send immediate response to Slack.
+    Worker function that runs the actual scan in background.
+    Uses response_url to send results back to Slack.
     """
-    url = body["text"].strip()
-
-    # Validate URL
-    if not url:
-        ack("❌ Please provide a URL to scan. Usage: `/scan https://example.com`")
-        return
-
-    # Add https:// if no protocol specified
-    if not url.startswith('http://') and not url.startswith('https://'):
-        url = 'https://' + url
-
-    scan_id = generate_scan_id()
-
-    # Acknowledge with initial message (this sends HTTP 200 to Slack immediately)
-    ack(f"🔍 *Scan initiated*\n• Target: `{url}`\n• Scan ID: `{scan_id}`\n\n⏳ Analyzing... This may take 15-30 seconds.")
-
-
-def process_scan_in_background(respond, body):
-    """
-    Lazy handler - runs after acknowledgment, can take longer.
-    Note: parameter order is (respond, body) for lazy listeners.
-    """
-    url = body["text"].strip()
-
-    # Add https:// if no protocol specified
-    if not url.startswith('http://') and not url.startswith('https://'):
-        url = 'https://' + url
-
-    scan_id = generate_scan_id()
-
-    # Re-normalize URL if needed
-    if not url.startswith('http://') and not url.startswith('https://'):
-        url = 'https://' + url
-
     try:
         # 1. Scan URL with headless Chrome
         screenshot_bytes, html, final_url = scan_url(url)
@@ -492,20 +453,55 @@ def process_scan_in_background(respond, body):
 
         # 4. Format and send report
         report = format_report(url, final_url, score, factors, evidence_url, scan_id)
-        respond(report)
+
+        # Send result via response_url
+        requests.post(response_url, json={"text": report, "response_type": "in_channel"})
 
         logger.info(f"Scan completed: {scan_id} - Score: {score}")
 
     except Exception as e:
         logger.error(f"Scan failed for {url}: {str(e)}")
-        respond(f"❌ *Scan failed*\n• Target: `{url}`\n• Error: `{str(e)}`\n\nPlease check if the URL is accessible and try again.")
+        error_msg = f"❌ *Scan failed*\n• Target: `{url}`\n• Error: `{str(e)}`\n\nPlease check if the URL is accessible and try again."
+        requests.post(response_url, json={"text": error_msg, "response_type": "in_channel"})
 
 
-# Register command with lazy listener pattern
-app.command("/scan")(
-    ack=respond_to_scan_command,
-    lazy=[process_scan_in_background]
-)
+# Handle the "/scan" command
+@app.command("/scan")
+def handle_scan_command(ack, body, client):
+    """
+    Handle /scan command. Acknowledges immediately, then processes scan.
+    Uses response_url to send results asynchronously.
+    """
+    # Acknowledge IMMEDIATELY with empty response (fastest way to satisfy 3s timeout)
+    ack()
+
+    url = body.get("text", "").strip()
+    response_url = body.get("response_url")
+    channel_id = body.get("channel_id")
+    user_id = body.get("user_id")
+
+    # Validate URL
+    if not url:
+        requests.post(response_url, json={
+            "text": "❌ Please provide a URL to scan. Usage: `/scan https://example.com`",
+            "response_type": "ephemeral"
+        })
+        return
+
+    # Add https:// if no protocol specified
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = 'https://' + url
+
+    scan_id = generate_scan_id()
+
+    # Send initial message via response_url
+    requests.post(response_url, json={
+        "text": f"🔍 *Scan initiated*\n• Target: `{url}`\n• Scan ID: `{scan_id}`\n\n⏳ Analyzing... This may take 15-30 seconds.",
+        "response_type": "in_channel"
+    })
+
+    # Run scan and send results via response_url
+    run_scan_worker(url, scan_id, response_url)
 
 
 # ============================================
